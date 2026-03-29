@@ -1,84 +1,134 @@
 # rr — Fast Command Runner
 
-Błyskawiczny launcher zapisanych komend z interaktywnym TUI i skrótami klawiszowymi.
+A keyboard-driven command launcher with an interactive TUI. Save your frequently used commands, run them instantly from anywhere, or insert them into your shell buffer for editing.
 
-## Instalacja
+## Installation
 
 ```bash
+git clone <repo>
+cd rr
 go build -o rr ./cmd/rr
-# Opcjonalnie: skopiuj binarny do miejsca w $PATH
-rr
+
+# Place the binary somewhere on your $PATH (no sudo needed)
+mkdir -p ~/.local/bin
+cp rr ~/.local/bin/rr
+
+# Make sure ~/.local/bin is in your PATH (add to ~/.zshrc if missing)
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-## Użycie
+## Quick start
 
 ```bash
-rr                      # otwiera TUI
-rr add -n "Deploy" -c "make deploy"              # dodaj lokalną komendę
-rr add --global -n "Git status" -c "git status"  # dodaj globalną komendę
-rr remove "Deploy"
-rr edit "Deploy" --command "make deploy-prod"
+rr add -n "Deploy" -c "make deploy"                  # add a local command
+rr add --global -n "Git status" -c "git status"      # add a global command
+rr                                                    # open the TUI
 ```
-
-## Konfiguracja
-
-### Zakresy komend
-
-| Zakres | Plik | Kiedy używać |
-|--------|------|--------------|
-| **local** | `.rr.json` w bieżącym katalogu | komendy specyficzne dla projektu |
-| **global** | `~/.config/rr/config.json` | komendy dostępne wszędzie |
-
-TUI wyświetla najpierw lokalne, potem globalne. Każda pozycja oznaczona jest kolorowym badge'em (`local` / `global`).
-
-### Subkomendy
-
-```bash
-# Dodawanie
-rr add -n "Nazwa" -c "komenda"              # lokalny (domyślnie)
-rr add --global -n "Nazwa" -c "komenda"     # globalny
-rr add -n "Nazwa" -c "komenda" -s x        # ręczny skrót (domyślnie auto)
-
-# Usuwanie — szuka lokalnie, potem globalnie
-rr remove "Nazwa"
-rr remove 2                   # wg indeksu (1-based) w danym zakresie
-rr remove --global "Nazwa"    # tylko globalny
-
-# Edycja
-rr edit "Nazwa" --command "nowa komenda"
-rr edit 1 --shortcut x
-rr edit --global "Nazwa" --name "Nowa nazwa"
-```
-
-### TUI — klawiatura
-
-| Klawisz | Akcja |
-|---------|-------|
-| `↑` / `↓` | nawigacja |
-| `1`, `a`, `d`, … | natychmiastowy wybór po skrócie |
-| `Enter` | uruchom komendę (exit 0) |
-| `Tab` | wstaw do bufora (exit 2) |
-| `Esc` / `Ctrl+C` | wyjdź bez akcji |
 
 ---
 
-## Integracja z zsh
+## Command scopes
 
-Dodaj poniższy snippet do `~/.zshrc`, aby wywołać `rr` skrótem klawiszowym.
+Commands live in one of two config files:
 
-- **`Enter`** — komenda zostaje natychmiast wykonana
-- **`Tab`** — komenda trafia do bufora wiersza poleceń (możesz ją edytować przed wykonaniem)
-- **`Esc`** — nic się nie dzieje, wracasz do prompta
+| Scope | File | When to use |
+|-------|------|-------------|
+| **local** | `.rr.json` in the current directory | project-specific commands |
+| **global** | `~/.config/rr/config.json` (macOS: `~/Library/Application Support/rr/config.json`) | commands available everywhere |
+
+The TUI lists local commands first, then global. Each entry is colour-coded accordingly.
+
+---
+
+## CLI reference
+
+### `rr add`
+
+```bash
+rr add -n "Name" -c "command"              # local (default)
+rr add --global -n "Name" -c "command"     # global
+rr add -n "Name" -c "command" -s x        # override auto-assigned shortcut
+```
+
+Shortcut keys are **auto-assigned** from the command name (first free letter, then digits, then the full alphabet). Pass `-s` only when you want a specific key.
+
+### `rr remove`
+
+```bash
+rr remove "Name"             # search local first, then global
+rr remove 2                  # by 1-based index within the searched scope
+rr remove --global "Name"    # global scope only
+```
+
+Aliases: `rm`, `delete`, `del`
+
+### `rr edit`
+
+```bash
+rr edit "Name" --command "new command"
+rr edit 1 --shortcut x
+rr edit --global "Name" --name "New name"
+```
+
+Only the flags you pass are updated; everything else stays the same.
+
+---
+
+## TUI
+
+Run `rr` without arguments to open the interactive interface.
+
+### Navigation
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` or `k` / `j` | move up / down |
+| `1`, `a`, `d`, … | jump instantly to the command with that shortcut key |
+| `Enter` | run the selected command (exits with code 0) |
+| `Tab` | insert the selected command into the shell buffer (exits with code 2) |
+| `Esc` / `Ctrl+C` | quit without doing anything |
+
+### Managing commands from within the TUI
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+N` | add a new command |
+| `Ctrl+E` | edit the selected command |
+| `Ctrl+D` | delete the selected command (asks for confirmation) |
+
+### Add / Edit form
+
+| Key | Action |
+|-----|--------|
+| `Tab` / `↓` | next field |
+| `Shift+Tab` / `↑` | previous field |
+| `Space` | toggle scope (`local` ↔ `global`) when on the scope field |
+| `Enter` | save |
+| `Esc` | cancel, return to the list |
+
+Shortcut field: leave empty to auto-assign, or type a single character to set it manually.
+
+---
+
+## zsh integration
+
+Add the snippet below to `~/.zshrc` to open `rr` with a keyboard shortcut directly from the command line.
+
+| TUI key | Shell behaviour |
+|---------|-----------------|
+| `Enter` | command is executed immediately |
+| `Tab` | command is placed in the buffer so you can edit it first |
+| `Esc` | nothing happens, prompt is restored |
 
 ```zsh
 # ── rr integration ────────────────────────────────────────────────────────────
 function _rr_widget() {
-  # TUI renderuje się na /dev/tty (nie przechwytywane przez shell).
-  # Wynik trafia do pliku tymczasowego przez --output-file,
-  # co omija wszelkie problemy z stdout w kontekście zle.
-  # Exit 0  → Enter  → wykonaj komendę od razu
-  # Exit 2  → Tab    → wstaw do bufora do edycji
-  # Inne    → Esc/Ctrl+C → nic nie rób
+  # rr renders its TUI directly on /dev/tty so the terminal is not
+  # affected by zle's stdout capture. The selected command is written
+  # to a temp file and read back after rr exits.
+  # exit 0 (Enter)  → execute immediately
+  # exit 2 (Tab)    → place in buffer for editing
+  # other           → do nothing (Esc / Ctrl+C)
   local tmpfile
   tmpfile=$(mktemp)
 
@@ -93,23 +143,26 @@ function _rr_widget() {
     BUFFER="$selected_command"
     CURSOR=$#BUFFER
     if [[ $ret -eq 0 ]]; then
-      zle accept-line   # Enter: od razu wykonaj
+      zle accept-line   # Enter: execute right away
     fi
-    # ret == 2 (Tab): zostaw w buforze do edycji, nie wykonuj
+    # ret == 2 (Tab): leave in buffer, do not execute
   fi
 
   zle reset-prompt
 }
 
 zle -N _rr_widget
-bindkey '^x' _rr_widget   # Ctrl+X — zmień na dowolny inny skrót
+bindkey '^x' _rr_widget   # Ctrl+X — change to any key you prefer
 # ─────────────────────────────────────────────────────────────────────────────
 ```
 
-> **Uwaga:** jeśli `rr` nie jest w `$PATH`, podaj pełną ścieżkę do binarki,
-> np. `selected_command=$(/usr/local/bin/rr)`.
+Reload your config after editing:
 
-### Alternatywne skróty
+```bash
+source ~/.zshrc
+```
+
+### Alternative key bindings
 
 ```zsh
 bindkey '^[r'  _rr_widget   # Alt+R
@@ -117,8 +170,27 @@ bindkey '^[^R' _rr_widget   # Alt+Shift+R
 bindkey '^x^r' _rr_widget   # Ctrl+X, Ctrl+R (chord)
 ```
 
-Po edycji `.zshrc` przeładuj konfigurację:
+> **Note:** if `rr` is not on your `$PATH`, use the full path:
+> `rr --output-file "$tmpfile"` → `/path/to/rr --output-file "$tmpfile"`
+
+---
+
+## Project layout
+
+```
+cmd/rr/main.go          entry point
+internal/
+  cli/                  Cobra subcommands (add, remove, edit, root)
+  tui/                  Bubble Tea model + form modal
+  config/               load / save ~/.config/rr/config.json and .rr.json
+  models/               CommandEntry domain type
+```
+
+## Building from source
+
+Requires Go 1.21+.
 
 ```bash
-source ~/.zshrc
+go build -o rr ./cmd/rr        # build
+go vet ./...                   # lint
 ```

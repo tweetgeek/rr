@@ -25,14 +25,29 @@ type selectedMsg struct {
 	code    exitCode
 }
 
+// reloadMsg is sent after a config mutation to refresh the list.
+type reloadMsg struct{ entries []models.CommandEntry }
+
+// ── App states ────────────────────────────────────────────────────────────────
+
+type appState int
+
+const (
+	stateList appState = iota
+	stateForm
+	stateDeleteConfirm
+)
+
 // ── Styles ────────────────────────────────────────────────────────────────────
 
 var (
 	localAccent  = lipgloss.Color("205")
 	globalAccent = lipgloss.Color("69")
 
-	dimStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	sepStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("237"))
+	dimStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	sepStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("237"))
+	errorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	boldStyle  = lipgloss.NewStyle().Bold(true)
 
 	localSelStyle = lipgloss.NewStyle().
 			PaddingLeft(1).
@@ -69,10 +84,16 @@ func (sepRow) rowType()   {}
 const maxVisible = 14
 
 type Model struct {
-	rows     []row
-	entries  []models.CommandEntry // selectable only, for shortcut lookup
-	cursor   int                   // index into rows (always points at an entryRow)
-	offset   int                   // first visible row index
+	// List
+	rows    []row
+	entries []models.CommandEntry
+	cursor  int
+	offset  int
+	// State machine
+	state     appState
+	form      formData
+	delEntry  models.CommandEntry
+	// Result
 	quitting bool
 	chosen   *selectedMsg
 }
@@ -117,7 +138,6 @@ func New(entries []models.CommandEntry) Model {
 		rows:    rows,
 		entries: entries,
 		cursor:  firstEntry,
-		offset:  0,
 	}
 }
 
@@ -153,13 +173,55 @@ func (m Model) selectedEntry() (models.CommandEntry, bool) {
 	return models.CommandEntry{}, false
 }
 
-// ── Bubble Tea interface ──────────────────────────────────────────────────────
+func (m *Model) reload(entries []models.CommandEntry) {
+	rows, _ := buildRows(entries)
+	m.entries = entries
+	m.rows = rows
+	// Keep cursor in bounds
+	if m.cursor >= len(rows) {
+		m.cursor = len(rows) - 1
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	// Skip separator if cursor landed on one
+	for m.cursor < len(rows) {
+		if _, isSep := rows[m.cursor].(sepRow); !isSep {
+			break
+		}
+		m.cursor++
+	}
+	m.clampOffset()
+}
+
+// ── Bubble Tea ────────────────────────────────────────────────────────────────
 
 func (m Model) Init() tea.Cmd { return nil }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle cross-state messages
 	switch msg := msg.(type) {
+	case reloadMsg:
+		m.reload(msg.entries)
+		m.state = stateList
+		return m, nil
+	case formErrMsg:
+		m.form.errMsg = string(msg)
+		return m, nil
+	}
 
+	switch m.state {
+	case stateForm:
+		return m.updateForm(msg)
+	case stateDeleteConfirm:
+		return m.updateDelete(msg)
+	default:
+		return m.updateList(msg)
+	}
+}
+
+func (m Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
 	case selectedMsg:
 		m.chosen = &msg
 		m.quitting = true
@@ -173,7 +235,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "up", "k":
 			m.move(-1)
-
 		case "down", "j":
 			m.move(1)
 
@@ -189,6 +250,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, func() tea.Msg { return selectedMsg{cmd, exitTab} }
 			}
 
+		case "ctrl+n":
+			m.form = initAddForm()
+			m.state = stateForm
+
+		case "ctrl+e":
+			if e, ok := m.selectedEntry(); ok {
+				m.form = initEditForm(e)
+				m.state = stateForm
+			}
+
+		case "ctrl+d":
+			if e, ok := m.selectedEntry(); ok {
+				m.delEntry = e
+				m.state = stateDeleteConfirm
+			}
+
 		default:
 			if len(msg.String()) == 1 {
 				key := msg.String()
@@ -201,15 +278,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
-
 	return m, nil
 }
+
+func (m Model) updateDelete(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if key, ok := msg.(tea.KeyMsg); ok {
+		switch key.String() {
+		case "y", "Y":
+			return m, deleteEntry(m.delEntry)
+		case "n", "N", "esc", "ctrl+c":
+			m.state = stateList
+		}
+	}
+	return m, nil
+}
+
+// ── Views ─────────────────────────────────────────────────────────────────────
 
 func (m Model) View() string {
 	if m.quitting {
 		return ""
 	}
+	switch m.state {
+	case stateForm:
+		return m.viewForm()
+	case stateDeleteConfirm:
+		return m.viewDelete()
+	default:
+		return m.viewList()
+	}
+}
 
+func (m Model) viewList() string {
 	var sb strings.Builder
 
 	sb.WriteString(lipgloss.NewStyle().
@@ -223,7 +323,6 @@ func (m Model) View() string {
 
 	for i := m.offset; i < end; i++ {
 		switch v := m.rows[i].(type) {
-
 		case sepRow:
 			label := strings.ToUpper(v.label)
 			line := "  " + label + " " + strings.Repeat("─", 40-len(label))
@@ -252,7 +351,32 @@ func (m Model) View() string {
 		}
 	}
 
-	sb.WriteString(dimStyle.Render("  ↑/↓  enter run  tab insert  esc quit") + "\n")
+	sb.WriteString(dimStyle.Render(
+		"  ↑/↓ enter tab  ctrl+n add  ctrl+e edit  ctrl+d del  esc quit",
+	) + "\n")
+	return sb.String()
+}
+
+func (m Model) viewDelete() string {
+	e := m.delEntry
+	badge := localBadge
+	if e.Scope == models.ScopeGlobal {
+		badge = globalBadge
+	}
+
+	var sb strings.Builder
+	sb.WriteString(lipgloss.NewStyle().Foreground(localAccent).Bold(true).PaddingLeft(2).Render("rr") + "\n")
+	sb.WriteString("\n")
+	sb.WriteString(errorStyle.Render("  Delete command?") + "\n")
+	sb.WriteString("\n")
+	sb.WriteString(fmt.Sprintf("  %s  %s  %s\n",
+		boldStyle.Render(e.Name),
+		dimStyle.Render(e.Command),
+		badge,
+	))
+	sb.WriteString("\n")
+	sb.WriteString("  " + errorStyle.Render("y") + dimStyle.Render(" yes    ") +
+		dimStyle.Render("n / esc  cancel") + "\n")
 	return sb.String()
 }
 
