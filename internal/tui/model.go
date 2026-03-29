@@ -390,10 +390,14 @@ func Run(entries []models.CommandEntry, outputFile string) {
 		fmt.Fprintf(os.Stderr, "cannot set raw mode: %v\n", err)
 		os.Exit(1)
 	}
-	defer restore()
+
+	// showCursor must be called before every os.Exit — defer does not run on Exit.
+	showCursor := func() {
+		restore()
+		fmt.Fprint(tty, "\033[?25h") // show cursor
+	}
 
 	fmt.Fprint(tty, "\033[?25l") // hide cursor
-	defer fmt.Fprint(tty, "\033[?25h\r")
 
 	m := New(entries)
 	var prevLines int
@@ -414,6 +418,7 @@ func Run(entries []models.CommandEntry, outputFile string) {
 	}
 
 	clearFrame(tty, prevLines)
+	showCursor()
 
 	if m.chosen == nil {
 		os.Exit(0)

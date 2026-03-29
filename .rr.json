@@ -1,0 +1,14 @@
+{
+  "commands": [
+    {
+      "name": "Build",
+      "command": "go build -o rr ./cmd/rr",
+      "shortcut_key": "u"
+    },
+    {
+      "name": "Test",
+      "command": "go test ./...",
+      "shortcut_key": "s"
+    }
+  ]
+}
