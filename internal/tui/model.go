@@ -5,11 +5,16 @@ import (
 	"os"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"rr/internal/models"
 )
+
+// ── Cmd / Msg — lightweight replacements for tea.Cmd / tea.Msg ───────────────
+// We no longer use tea.NewProgram, so we define our own minimal types.
+
+type Msg interface{}
+type Cmd func() Msg
 
 // ── Exit codes ────────────────────────────────────────────────────────────────
 
@@ -20,13 +25,15 @@ const (
 	exitTab   exitCode = 2
 )
 
+// ── Messages ──────────────────────────────────────────────────────────────────
+
 type selectedMsg struct {
 	command string
 	code    exitCode
 }
 
-// reloadMsg is sent after a config mutation to refresh the list.
 type reloadMsg struct{ entries []models.CommandEntry }
+type formErrMsg string
 
 // ── App states ────────────────────────────────────────────────────────────────
 
@@ -84,16 +91,15 @@ func (sepRow) rowType()   {}
 const maxVisible = 14
 
 type Model struct {
-	// List
 	rows    []row
 	entries []models.CommandEntry
 	cursor  int
 	offset  int
-	// State machine
-	state     appState
-	form      formData
-	delEntry  models.CommandEntry
-	// Result
+
+	state    appState
+	form     formData
+	delEntry models.CommandEntry
+
 	quitting bool
 	chosen   *selectedMsg
 }
@@ -132,16 +138,16 @@ func buildRows(entries []models.CommandEntry) ([]row, int) {
 	return rows, firstEntry
 }
 
-func New(entries []models.CommandEntry) Model {
+func New(entries []models.CommandEntry) *Model {
 	rows, firstEntry := buildRows(entries)
-	return Model{
+	return &Model{
 		rows:    rows,
 		entries: entries,
 		cursor:  firstEntry,
 	}
 }
 
-// ── Navigation helpers ────────────────────────────────────────────────────────
+// ── Navigation ────────────────────────────────────────────────────────────────
 
 func (m *Model) move(dir int) {
 	idx := m.cursor + dir
@@ -164,7 +170,7 @@ func (m *Model) clampOffset() {
 	}
 }
 
-func (m Model) selectedEntry() (models.CommandEntry, bool) {
+func (m *Model) selectedEntry() (models.CommandEntry, bool) {
 	if m.cursor < len(m.rows) {
 		if r, ok := m.rows[m.cursor].(entryRow); ok {
 			return r.entry, true
@@ -177,14 +183,12 @@ func (m *Model) reload(entries []models.CommandEntry) {
 	rows, _ := buildRows(entries)
 	m.entries = entries
 	m.rows = rows
-	// Keep cursor in bounds
 	if m.cursor >= len(rows) {
 		m.cursor = len(rows) - 1
 	}
 	if m.cursor < 0 {
 		m.cursor = 0
 	}
-	// Skip separator if cursor landed on one
 	for m.cursor < len(rows) {
 		if _, isSep := rows[m.cursor].(sepRow); !isSep {
 			break
@@ -194,111 +198,95 @@ func (m *Model) reload(entries []models.CommandEntry) {
 	m.clampOffset()
 }
 
-// ── Bubble Tea ────────────────────────────────────────────────────────────────
+// ── Update ────────────────────────────────────────────────────────────────────
 
-func (m Model) Init() tea.Cmd { return nil }
-
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Handle cross-state messages
-	switch msg := msg.(type) {
-	case reloadMsg:
-		m.reload(msg.entries)
-		m.state = stateList
-		return m, nil
-	case formErrMsg:
-		m.form.errMsg = string(msg)
-		return m, nil
-	}
-
+// update handles a single keypress in whichever state is active.
+// It mutates m in place and returns a Cmd if an async operation must follow.
+func (m *Model) update(key string) Cmd {
 	switch m.state {
 	case stateForm:
-		return m.updateForm(msg)
+		return m.updateForm(key)
 	case stateDeleteConfirm:
-		return m.updateDelete(msg)
+		return m.updateDelete(key)
 	default:
-		return m.updateList(msg)
+		return m.updateList(key)
 	}
 }
 
-func (m Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
+// dispatch runs cmd (if non-nil) and applies the resulting Msg to m.
+func (m *Model) dispatch(cmd Cmd) {
+	if cmd == nil {
+		return
+	}
+	switch msg := cmd().(type) {
+	case reloadMsg:
+		m.reload(msg.entries)
+		m.state = stateList
+	case formErrMsg:
+		m.form.errMsg = string(msg)
 	case selectedMsg:
 		m.chosen = &msg
 		m.quitting = true
-		return m, tea.Quit
+	}
+}
 
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c", "esc":
-			m.quitting = true
-			return m, tea.Quit
-
-		case "up", "k":
-			m.move(-1)
-		case "down", "j":
-			m.move(1)
-
-		case "enter":
-			if e, ok := m.selectedEntry(); ok {
-				cmd := e.Command
-				return m, func() tea.Msg { return selectedMsg{cmd, exitClean} }
-			}
-
-		case "tab":
-			if e, ok := m.selectedEntry(); ok {
-				cmd := e.Command
-				return m, func() tea.Msg { return selectedMsg{cmd, exitTab} }
-			}
-
-		case "ctrl+n":
-			m.form = initAddForm()
+func (m *Model) updateList(key string) Cmd {
+	switch key {
+	case "ctrl+c", "esc":
+		m.quitting = true
+	case "up", "k":
+		m.move(-1)
+	case "down", "j":
+		m.move(1)
+	case "enter":
+		if e, ok := m.selectedEntry(); ok {
+			cmd := e.Command
+			return func() Msg { return selectedMsg{cmd, exitClean} }
+		}
+	case "tab":
+		if e, ok := m.selectedEntry(); ok {
+			cmd := e.Command
+			return func() Msg { return selectedMsg{cmd, exitTab} }
+		}
+	case "ctrl+n":
+		m.form = initAddForm()
+		m.state = stateForm
+	case "ctrl+e":
+		if e, ok := m.selectedEntry(); ok {
+			m.form = initEditForm(e)
 			m.state = stateForm
-
-		case "ctrl+e":
-			if e, ok := m.selectedEntry(); ok {
-				m.form = initEditForm(e)
-				m.state = stateForm
-			}
-
-		case "ctrl+d":
-			if e, ok := m.selectedEntry(); ok {
-				m.delEntry = e
-				m.state = stateDeleteConfirm
-			}
-
-		default:
-			if len(msg.String()) == 1 {
-				key := msg.String()
-				for _, e := range m.entries {
-					if strings.EqualFold(e.ShortcutKey, key) {
-						cmd := e.Command
-						return m, func() tea.Msg { return selectedMsg{cmd, exitClean} }
-					}
+		}
+	case "ctrl+d":
+		if e, ok := m.selectedEntry(); ok {
+			m.delEntry = e
+			m.state = stateDeleteConfirm
+		}
+	default:
+		if len(key) == 1 {
+			for _, e := range m.entries {
+				if strings.EqualFold(e.ShortcutKey, key) {
+					cmd := e.Command
+					return func() Msg { return selectedMsg{cmd, exitClean} }
 				}
 			}
 		}
 	}
-	return m, nil
+	return nil
 }
 
-func (m Model) updateDelete(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if key, ok := msg.(tea.KeyMsg); ok {
-		switch key.String() {
-		case "y", "Y":
-			return m, deleteEntry(m.delEntry)
-		case "n", "N", "esc", "ctrl+c":
-			m.state = stateList
-		}
+func (m *Model) updateDelete(key string) Cmd {
+	switch key {
+	case "y", "Y":
+		return deleteEntry(m.delEntry)
+	case "n", "N", "esc", "ctrl+c":
+		m.state = stateList
 	}
-	return m, nil
+	return nil
 }
 
-// ── Views ─────────────────────────────────────────────────────────────────────
+// ── View ──────────────────────────────────────────────────────────────────────
 
-func (m Model) View() string {
-	if m.quitting {
-		return ""
-	}
+func (m *Model) View() string {
 	switch m.state {
 	case stateForm:
 		return m.viewForm()
@@ -309,7 +297,7 @@ func (m Model) View() string {
 	}
 }
 
-func (m Model) viewList() string {
+func (m *Model) viewList() string {
 	var sb strings.Builder
 
 	sb.WriteString(lipgloss.NewStyle().
@@ -357,7 +345,7 @@ func (m Model) viewList() string {
 	return sb.String()
 }
 
-func (m Model) viewDelete() string {
+func (m *Model) viewDelete() string {
 	e := m.delEntry
 	badge := localBadge
 	if e.Scope == models.ScopeGlobal {
@@ -390,38 +378,55 @@ func Run(entries []models.CommandEntry, outputFile string) {
 		os.Exit(1)
 	}
 
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	tty, err := openTTY()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot open /dev/tty: %v\n", err)
 		os.Exit(1)
 	}
 	defer tty.Close()
 
-	m := New(entries)
-	p := tea.NewProgram(m,
-		tea.WithInput(tty),
-		tea.WithOutput(tty),
-	)
-
-	result, err := p.Run()
+	restore, err := withRawMode(int(tty.Fd()))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cannot set raw mode: %v\n", err)
 		os.Exit(1)
 	}
+	defer restore()
 
-	final, ok := result.(Model)
-	if !ok || final.chosen == nil {
+	fmt.Fprint(tty, "\033[?25l") // hide cursor
+	defer fmt.Fprint(tty, "\033[?25h\r")
+
+	m := New(entries)
+	var prevLines int
+
+	renderFrame(tty, m.View(), &prevLines)
+
+	for !m.quitting {
+		key := readKey(tty)
+		if key == "" {
+			continue
+		}
+		cmd := m.update(key)
+		m.dispatch(cmd)
+		if m.quitting {
+			break
+		}
+		renderFrame(tty, m.View(), &prevLines)
+	}
+
+	clearFrame(tty, prevLines)
+
+	if m.chosen == nil {
 		os.Exit(0)
 	}
 
 	if outputFile != "" {
-		if err := os.WriteFile(outputFile, []byte(final.chosen.command), 0o600); err != nil {
+		if err := os.WriteFile(outputFile, []byte(m.chosen.command), 0o600); err != nil {
 			fmt.Fprintf(os.Stderr, "cannot write output file: %v\n", err)
 			os.Exit(1)
 		}
 	} else {
-		fmt.Print(final.chosen.command)
+		fmt.Print(m.chosen.command)
 	}
 
-	os.Exit(int(final.chosen.code))
+	os.Exit(int(m.chosen.code))
 }

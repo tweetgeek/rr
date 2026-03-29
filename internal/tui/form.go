@@ -4,15 +4,90 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"rr/internal/config"
 	"rr/internal/models"
 )
 
-// ── Form mode ─────────────────────────────────────────────────────────────────
+// ── textField — minimal single-line editor ────────────────────────────────────
+
+type textField struct {
+	value       []rune
+	cursor      int
+	limit       int    // 0 = unlimited
+	placeholder string
+}
+
+func newTextField(placeholder string, limit int) textField {
+	return textField{placeholder: placeholder, limit: limit}
+}
+
+func (t *textField) setValue(s string) {
+	t.value = []rune(s)
+	t.cursor = len(t.value)
+}
+
+func (t textField) Value() string { return string(t.value) }
+
+func (t *textField) insert(r rune) {
+	if t.limit > 0 && len(t.value) >= t.limit {
+		return
+	}
+	v := t.value
+	t.value = append(v[:t.cursor:t.cursor], append([]rune{r}, v[t.cursor:]...)...)
+	t.cursor++
+}
+
+func (t *textField) backspace() {
+	if t.cursor > 0 {
+		v := t.value
+		t.value = append(v[:t.cursor-1:t.cursor-1], v[t.cursor:]...)
+		t.cursor--
+	}
+}
+
+func (t *textField) deleteFwd() {
+	if t.cursor < len(t.value) {
+		v := t.value
+		t.value = append(v[:t.cursor:t.cursor], v[t.cursor+1:]...)
+	}
+}
+
+func (t *textField) moveLeft()  { if t.cursor > 0 { t.cursor-- } }
+func (t *textField) moveRight() { if t.cursor < len(t.value) { t.cursor++ } }
+func (t *textField) moveHome()  { t.cursor = 0 }
+func (t *textField) moveEnd()   { t.cursor = len(t.value) }
+
+// view renders the field as a fixed-width string.
+// focused=true shows a block cursor; focused=false shows the value dimmed or placeholder.
+func (t textField) view(focused bool, width int) string {
+	if !focused {
+		val := string(t.value)
+		if val == "" {
+			val = dimStyle.Render(t.placeholder)
+		}
+		return lipgloss.NewStyle().Width(width).Render(val)
+	}
+
+	// Split around cursor for cursor rendering
+	before := string(t.value[:t.cursor])
+	var cursorChar, after string
+	if t.cursor < len(t.value) {
+		cursorChar = lipgloss.NewStyle().Reverse(true).Foreground(localAccent).Render(string(t.value[t.cursor]))
+		after = string(t.value[t.cursor+1:])
+	} else {
+		cursorChar = lipgloss.NewStyle().Reverse(true).Render(" ")
+	}
+
+	content := lipgloss.NewStyle().Foreground(localAccent).Render(before) +
+		cursorChar +
+		lipgloss.NewStyle().Foreground(localAccent).Render(after)
+
+	return lipgloss.NewStyle().Width(width).Render(content)
+}
+
+// ── Form mode & field indices ─────────────────────────────────────────────────
 
 type formMode int
 
@@ -21,16 +96,6 @@ const (
 	modeEdit
 )
 
-// ── Form styles ───────────────────────────────────────────────────────────────
-
-var (
-	formTitleStyle     = lipgloss.NewStyle().Bold(true).Foreground(localAccent).PaddingLeft(2)
-	labelStyle         = lipgloss.NewStyle().Width(11).Foreground(lipgloss.Color("250"))
-	scopeActiveStyle   = lipgloss.NewStyle().Foreground(localAccent).Bold(true)
-	scopeInactiveStyle = dimStyle
-)
-
-// fieldIdx constants for readability.
 const (
 	fieldName     = 0
 	fieldCommand  = 1
@@ -43,35 +108,23 @@ const (
 
 type formData struct {
 	mode     formMode
-	original models.CommandEntry // for edit: the entry being replaced
-	inputs   [3]textinput.Model
-	focus    int          // 0–3
-	scope    models.Scope // local or global
+	original models.CommandEntry
+	inputs   [3]textField
+	focus    int
+	scope    models.Scope
 	errMsg   string
 }
 
-func newInput(placeholder string, limit int) textinput.Model {
-	t := textinput.New()
-	t.Placeholder = placeholder
-	t.CharLimit = limit
-	t.Prompt = ""
-	t.Width = 40
-	t.PromptStyle = dimStyle
-	t.PlaceholderStyle = dimStyle
-	t.TextStyle = lipgloss.NewStyle()
-	return t
-}
-
 func initAddForm() formData {
-	f := formData{
+	return formData{
 		mode:  modeAdd,
 		scope: models.ScopeLocal,
+		inputs: [3]textField{
+			newTextField("required", 80),
+			newTextField("required", 256),
+			newTextField("auto", 1),
+		},
 	}
-	f.inputs[fieldName] = newInput("required", 80)
-	f.inputs[fieldCommand] = newInput("required", 256)
-	f.inputs[fieldShortcut] = newInput("auto", 1)
-	f.inputs[fieldName].Focus()
-	return f
 }
 
 func initEditForm(e models.CommandEntry) formData {
@@ -79,94 +132,86 @@ func initEditForm(e models.CommandEntry) formData {
 	f.mode = modeEdit
 	f.original = e
 	f.scope = e.Scope
-	f.inputs[fieldName].SetValue(e.Name)
-	f.inputs[fieldCommand].SetValue(e.Command)
-	f.inputs[fieldShortcut].SetValue(e.ShortcutKey)
+	f.inputs[fieldName].setValue(e.Name)
+	f.inputs[fieldCommand].setValue(e.Command)
+	f.inputs[fieldShortcut].setValue(e.ShortcutKey)
 	return f
+}
+
+func (f *formData) nextField() { f.focus = (f.focus + 1) % fieldCount }
+func (f *formData) prevField() { f.focus = (f.focus - 1 + fieldCount) % fieldCount }
+
+func (f *formData) toggleScope() {
+	if f.scope == models.ScopeLocal {
+		f.scope = models.ScopeGlobal
+	} else {
+		f.scope = models.ScopeLocal
+	}
 }
 
 // ── Form update ───────────────────────────────────────────────────────────────
 
-func (m Model) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
-	key, isKey := msg.(tea.KeyMsg)
-	if !isKey {
-		// Forward to focused textinput
-		var cmd tea.Cmd
-		if m.form.focus < 3 {
-			m.form.inputs[m.form.focus], cmd = m.form.inputs[m.form.focus].Update(msg)
-		}
-		return m, cmd
-	}
+func (m *Model) updateForm(key string) Cmd {
+	f := &m.form
+	f.errMsg = ""
 
-	switch key.String() {
+	switch key {
 	case "esc", "ctrl+c":
 		m.state = stateList
-		return m, nil
+		return nil
 
 	case "tab", "down":
-		m.form.errMsg = ""
-		m.form.blur()
-		m.form.focus = (m.form.focus + 1) % fieldCount
-		m.form.focusCurrent()
-
+		f.nextField()
 	case "shift+tab", "up":
-		m.form.errMsg = ""
-		m.form.blur()
-		m.form.focus = (m.form.focus - 1 + fieldCount) % fieldCount
-		m.form.focusCurrent()
-
-	case " ":
-		// Toggle scope when on scope field.
-		if m.form.focus == fieldScope {
-			if m.form.scope == models.ScopeLocal {
-				m.form.scope = models.ScopeGlobal
-			} else {
-				m.form.scope = models.ScopeLocal
-			}
-			return m, nil
-		}
+		f.prevField()
 
 	case "enter":
-		if m.form.focus == fieldScope || m.form.focus == fieldShortcut {
-			// Save from last two fields.
-			return m, m.form.save(m.entries)
+		if f.focus >= fieldShortcut {
+			return f.save(m.entries)
 		}
-		// Advance to next field from name/command.
-		m.form.errMsg = ""
-		m.form.blur()
-		m.form.focus = (m.form.focus + 1) % fieldCount
-		m.form.focusCurrent()
-	}
+		f.nextField()
 
-	// Forward to focused textinput.
-	var cmd tea.Cmd
-	if m.form.focus < 3 {
-		m.form.inputs[m.form.focus], cmd = m.form.inputs[m.form.focus].Update(msg)
+	case " ":
+		if f.focus == fieldScope {
+			f.toggleScope()
+		} else {
+			f.inputs[f.focus].insert(' ')
+		}
+
+	case "backspace":
+		if f.focus < fieldScope {
+			f.inputs[f.focus].backspace()
+		}
+	case "delete":
+		if f.focus < fieldScope {
+			f.inputs[f.focus].deleteFwd()
+		}
+	case "left":
+		if f.focus < fieldScope {
+			f.inputs[f.focus].moveLeft()
+		}
+	case "right":
+		if f.focus < fieldScope {
+			f.inputs[f.focus].moveRight()
+		}
+
+	default:
+		if len(key) == 1 && f.focus < fieldScope {
+			f.inputs[f.focus].insert([]rune(key)[0])
+		}
 	}
-	return m, cmd
+	return nil
 }
 
-func (f *formData) blur() {
-	if f.focus < 3 {
-		f.inputs[f.focus].Blur()
-	}
-}
+// ── Form save ─────────────────────────────────────────────────────────────────
 
-func (f *formData) focusCurrent() {
-	if f.focus < 3 {
-		f.inputs[f.focus].Focus()
-	}
-}
-
-// save validates the form and writes to config, then emits a reloadMsg.
-func (f formData) save(existing []models.CommandEntry) tea.Cmd {
+func (f *formData) save(existing []models.CommandEntry) Cmd {
 	name := strings.TrimSpace(f.inputs[fieldName].Value())
 	cmd := strings.TrimSpace(f.inputs[fieldCommand].Value())
 	shortcut := strings.TrimSpace(f.inputs[fieldShortcut].Value())
 
-	// Inline validation — return an errMsg cmd if invalid.
-	errCmd := func(msg string) tea.Cmd {
-		return func() tea.Msg { return formErrMsg(msg) }
+	errCmd := func(msg string) Cmd {
+		return func() Msg { return formErrMsg(msg) }
 	}
 
 	if name == "" {
@@ -176,14 +221,13 @@ func (f formData) save(existing []models.CommandEntry) tea.Cmd {
 		return errCmd("command is required")
 	}
 
-	// Shortcut uniqueness check (exclude the entry being edited).
 	if shortcut != "" {
 		for _, e := range existing {
 			if e.ShortcutKey != shortcut {
 				continue
 			}
 			if f.mode == modeEdit && e.Name == f.original.Name && e.Scope == f.original.Scope {
-				continue // same entry — OK
+				continue
 			}
 			return errCmd(fmt.Sprintf("shortcut '%s' already used by '%s'", shortcut, e.Name))
 		}
@@ -191,18 +235,17 @@ func (f formData) save(existing []models.CommandEntry) tea.Cmd {
 		shortcut = config.AutoShortcut(name, existing)
 	}
 
-	entry := models.CommandEntry{
-		Name:        name,
-		Command:     cmd,
-		ShortcutKey: shortcut,
-	}
+	entry := models.CommandEntry{Name: name, Command: cmd, ShortcutKey: shortcut}
+	scope := f.scope
+	mode := f.mode
+	original := f.original
 
-	return func() tea.Msg {
+	return func() Msg {
 		var err error
-		if f.mode == modeAdd {
-			err = addEntry(entry, f.scope)
+		if mode == modeAdd {
+			err = addEntry(entry, scope)
 		} else {
-			err = editEntry(f.original, entry, f.scope)
+			err = editEntry(original, entry, scope)
 		}
 		if err != nil {
 			return formErrMsg(err.Error())
@@ -213,14 +256,6 @@ func (f formData) save(existing []models.CommandEntry) tea.Cmd {
 		}
 		return reloadMsg{entries}
 	}
-}
-
-// formErrMsg carries a validation or save error back into the Update loop.
-type formErrMsg string
-
-// Make sure Model handles formErrMsg in its Update.
-func init() {
-	// Handled in model.go Update via type switch on reloadMsg / formErrMsg.
 }
 
 // ── Config mutations ──────────────────────────────────────────────────────────
@@ -243,15 +278,14 @@ func addEntry(e models.CommandEntry, scope models.Scope) error {
 }
 
 func editEntry(original, updated models.CommandEntry, scope models.Scope) error {
-	// Remove from original scope, add to (possibly different) scope.
 	if err := removeEntryFromConfig(original); err != nil {
 		return err
 	}
 	return addEntry(updated, scope)
 }
 
-func deleteEntry(e models.CommandEntry) tea.Cmd {
-	return func() tea.Msg {
+func deleteEntry(e models.CommandEntry) Cmd {
+	return func() Msg {
 		if err := removeEntryFromConfig(e); err != nil {
 			return formErrMsg(err.Error())
 		}
@@ -292,7 +326,14 @@ func removeByName(cmds []models.CommandEntry, name string) []models.CommandEntry
 
 // ── Form view ─────────────────────────────────────────────────────────────────
 
-func (m Model) viewForm() string {
+var (
+	formTitleStyle     = lipgloss.NewStyle().Bold(true).Foreground(localAccent).PaddingLeft(2)
+	labelStyle         = lipgloss.NewStyle().Width(11).Foreground(lipgloss.Color("250"))
+	scopeActiveStyle   = lipgloss.NewStyle().Foreground(localAccent).Bold(true)
+	scopeInactiveStyle = dimStyle
+)
+
+func (m *Model) viewForm() string {
 	f := m.form
 	title := "add command"
 	if f.mode == modeEdit {
@@ -306,57 +347,31 @@ func (m Model) viewForm() string {
 		return "  "
 	}
 
-	underline := func(focused bool, value string) string {
-		w := 40
-		padded := value + strings.Repeat(" ", max(0, w-len([]rune(value))))
-		if focused {
-			return lipgloss.NewStyle().
-				Foreground(localAccent).
-				Underline(true).
-				Render(padded)
-		}
-		return lipgloss.NewStyle().
-			Foreground(lipgloss.Color("252")).
-			Underline(true).
-			Render(padded)
-	}
-
+	const fieldW = 40
 	var sb strings.Builder
-	sb.WriteString(formTitleStyle.Render("rr  ·  "+title) + "\n")
-	sb.WriteString(dimStyle.Render("  " + strings.Repeat("─", 54)) + "\n")
 
-	// Name
-	sb.WriteString(
-		labelStyle.Render("name") +
-			marker(f.focus == fieldName) +
-			underline(f.focus == fieldName, f.inputs[fieldName].Value()) +
-			"\n",
-	)
-	// Command
-	sb.WriteString(
-		labelStyle.Render("command") +
-			marker(f.focus == fieldCommand) +
-			underline(f.focus == fieldCommand, f.inputs[fieldCommand].Value()) +
-			"\n",
-	)
-	// Shortcut
-	scVal := f.inputs[fieldShortcut].Value()
-	scDisplay := scVal
-	if scDisplay == "" {
-		scDisplay = dimStyle.Render("auto")
+	sb.WriteString(formTitleStyle.Render("rr  ·  "+title) + "\n")
+	sb.WriteString(dimStyle.Render("  "+strings.Repeat("─", 54)) + "\n")
+
+	// Text input fields
+	defs := [3]struct{ label string }{{"name"}, {"command"}, {"shortcut"}}
+	for i, d := range defs {
+		focused := f.focus == i
+		hint := ""
+		if i == fieldShortcut {
+			hint = "  " + dimStyle.Render("(empty = auto)")
+		}
+		sb.WriteString(
+			labelStyle.Render(d.label) +
+				marker(focused) +
+				f.inputs[i].view(focused, fieldW) +
+				hint + "\n",
+		)
 	}
-	sb.WriteString(
-		labelStyle.Render("shortcut") +
-			marker(f.focus == fieldShortcut) +
-			underline(f.focus == fieldShortcut, scVal) +
-			"  " + dimStyle.Render("(empty = auto-assign)") +
-			"\n",
-	)
-	_ = scDisplay
 
 	// Scope toggle
-	localStr := scopeInactiveStyle.Render("local")
-	globalStr := scopeInactiveStyle.Render("global")
+	localStr := scopeInactiveStyle.Render("  local")
+	globalStr := scopeInactiveStyle.Render("  global")
 	if f.scope == models.ScopeLocal {
 		localStr = scopeActiveStyle.Render("● local")
 	} else {
@@ -366,11 +381,10 @@ func (m Model) viewForm() string {
 		labelStyle.Render("scope") +
 			marker(f.focus == fieldScope) +
 			localStr + "   " + globalStr +
-			dimStyle.Render("  (space to toggle)") +
-			"\n",
+			"  " + dimStyle.Render("(space)") + "\n",
 	)
 
-	sb.WriteString(dimStyle.Render("  " + strings.Repeat("─", 54)) + "\n")
+	sb.WriteString(dimStyle.Render("  "+strings.Repeat("─", 54)) + "\n")
 
 	if f.errMsg != "" {
 		sb.WriteString(errorStyle.Render("  ✖ "+f.errMsg) + "\n")
@@ -379,11 +393,4 @@ func (m Model) viewForm() string {
 	}
 
 	return sb.String()
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
