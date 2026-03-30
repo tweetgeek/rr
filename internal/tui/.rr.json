@@ -1,0 +1,9 @@
+{
+  "commands": [
+    {
+      "name": "Deploy",
+      "command": "make deploy",
+      "shortcut_key": "d"
+    }
+  ]
+}
